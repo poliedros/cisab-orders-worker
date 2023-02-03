@@ -1,19 +1,36 @@
+# -*- coding: utf-8 -*-
+
 import os
 import json
 import pika
+import logging
 import pymongo
 import pandas as pd
 from datetime import datetime
+from dotenv import load_dotenv
 from azure.storage.blob import BlobClient
 
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+load_dotenv()
+
 # Realizando conexão com o banco
+if os.getenv("MONGO_CONN_STR") is None:
+    logging.error("Unable to get environment variables.")
+    exit()
+
 client = pymongo.MongoClient(
     os.getenv("MONGO_CONN_STR"), serverSelectionTimeoutMS=5000)
 
 try:
     client.server_info()
 except Exception:
-    print("Unable to connect to the server.")
+    logging.error("Unable to connect to Mongo server.")
+    exit()
 
 database = client.get_database()
 
@@ -34,6 +51,9 @@ demands = demand_collection.find({
 })
 
 closed_demands = [str(demand["_id"]) for demand in demands]
+if len(closed_demands) == 0:
+    logging.info("There's no demand closing today!")
+    exit()
 
 # Extraindo carrinhos fechados das demandas fechadas
 carts = cart_collection.find({
@@ -49,6 +69,8 @@ counties = county_collection.find()
 df_carts = pd.DataFrame(carts)
 df_products = pd.DataFrame(products)
 df_counties = pd.DataFrame(counties)
+
+logging.info(str(len(df_carts)) + " orders for today.")
 
 # Pre-processando os dataframes
 df_carts = df_carts.rename(columns={'_id': 'cart_id'})
@@ -115,15 +137,28 @@ df_pivot["Total"] = df_pivot.sum(axis=1)
 file_name = "Consolidado-de-Pedidos-" + str(datetime.today().date()) + ".xlsx"
 df_pivot.to_excel(file_name)
 
-blob = BlobClient.from_connection_string(conn_str=os.getenv(
-    "AZURE_CONN_STR"), container_name="cisab-consolidados", blob_name=file_name)
+try:
+    blob = BlobClient.from_connection_string(conn_str=os.getenv(
+        "AZURE_CONN_STR"), container_name="cisab-consolidados", blob_name=file_name)
+except:
+    logging.error("Unable to connect with Blob Storage.")
+    exit()
 
-# with open(file_name, "rb") as data:
-#     blob.upload_blob(data)
+try:
+    with open(file_name, "rb") as data:
+        blob.upload_blob(data)
+except:
+    logging.error("Unable to upload the file to Blob Storage.")
+    exit()
 
 # Enviando evento para o RabbitMQ mandar o email
-connection = pika.BlockingConnection(
-    pika.ConnectionParameters(os.getenv("RABBITMQ_CONN_STR")))
+try:
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(os.getenv("RABBITMQ_CONN_STR")))
+except:
+    logging.error("Unable to connect with RabbitMQ.")
+    exit()
+
 channel = connection.channel()
 
 event = {
