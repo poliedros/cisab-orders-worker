@@ -61,5 +61,5 @@ jobs:
         with:
           name: "VERSION"
           value: $((${{ secrets.VERSION }}+1))
-          repository: poliedros/cisab-api
+          repository: poliedros/cisab-orders-worker
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
