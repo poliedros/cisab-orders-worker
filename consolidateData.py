@@ -134,7 +134,9 @@ df_pivot = df.pivot_table(
 df_pivot["Total"] = df_pivot.sum(axis=1)
 
 # Exportando o dataframe final para planilha em Excel na Azure
-file_name = "Consolidado-de-Pedidos-" + str(datetime.today().date()) + ".xlsx"
+format_data = "%Y-%m-%d_%H-%M-%S"
+file_name = "Consolidado-de-Pedidos_" + \
+    datetime.strftime(datetime.today(), format_data) + ".xlsx"
 df_pivot.to_excel(file_name)
 
 try:
@@ -153,8 +155,13 @@ except:
 
 # Enviando evento para o RabbitMQ mandar o email
 try:
+    credentials = pika.PlainCredentials(os.getenv("RABBITMQ_USER"),
+                                        os.getenv("RABBITMQ_PASSWORD"))
     connection = pika.BlockingConnection(
-        pika.ConnectionParameters(os.getenv("RABBITMQ_CONN_STR")))
+        pika.ConnectionParameters(os.getenv("RABBITMQ_CONN_STR"),
+                                  int(os.getenv("RABBITMQ_PORT")),
+                                  '/',
+                                  credentials))
 except:
     logging.error("Unable to connect with RabbitMQ.")
     exit()
