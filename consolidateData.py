@@ -168,15 +168,24 @@ except:
 
 channel = connection.channel()
 
+to = os.getenv("RABBITMQ_TO")
 event = {
-    "message": {
-        "to": os.getenv("RABBITMQ_TO"),
+    "pattern": "send_email",
+    "data": {
+      "message": {
+        "to": to,
         "subject": "Consolidado de pedidos",
-        "body": "A demanda fechou e você pode baixar o consolidado de pedidos pelo link: " + os.getenv("AZURE_BLOB_STORAGE") + file_name
+        "body": "A demanda fechou e você pode baixar o consolidado de pedidos pelo link: <a href='" + os.getenv("AZURE_BLOB_STORAGE") + file_name + "'>clique aqui</a>"
+      }
     }
 }
 
-channel.queue_declare(queue='send_email')
+
+channel.queue_declare(queue='notifier')
 channel.basic_publish(exchange='',
-                      routing_key='send_email',
+                      routing_key='notifier',
                       body=json.dumps(event, ensure_ascii=False))
+
+logging.info(f"Email has been sent to {to}")
+
+channel.close()
