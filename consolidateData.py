@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 
 import os
@@ -10,6 +11,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from azure.storage.blob import BlobClient
 
+
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
     level=logging.INFO,
@@ -17,6 +19,7 @@ logging.basicConfig(
 )
 
 load_dotenv()
+
 
 # Realizando conexão com o banco
 if os.getenv("MONGO_CONN_STR") is None:
@@ -34,11 +37,11 @@ except Exception:
 
 database = client.get_database()
 
+
 # Extraindo coleções
 cart_collection = database.get_collection("carts")
 demand_collection = database.get_collection("demands")
-product_collection = database.get_collection("products")
-county_collection = database.get_collection("counties")
+
 
 # Extraindo demandas que fecham na data de hoje
 today = datetime.today()
@@ -55,137 +58,143 @@ if len(closed_demands) == 0:
     logging.info("There's no demand closing today!")
     exit()
 
+
 # Extraindo carrinhos fechados das demandas fechadas
 carts = cart_collection.find({
     "state": {"$eq": "closed"},
     "demand_id": {"$in": closed_demands}
 })
 
-# Extraindo todos os produtos, municípios e autarquias
-products = product_collection.find()
-counties = county_collection.find()
 
 # Transformando as coleções em dataframes
-df_carts = pd.DataFrame(carts)
-df_products = pd.DataFrame(products)
-df_counties = pd.DataFrame(counties)
+df_carts = pd.DataFrame(list(carts))
 
 logging.info(str(len(df_carts)) + " orders for today.")
 
-# Pre-processando os dataframes
+
+# Pré-processamento
 df_carts = df_carts.rename(columns={'_id': 'cart_id'})
-df_products = df_products.rename(columns={'_id': 'product_id'})
 
-df_carts.county_id = df_carts.county_id.astype(str)
-df_counties._id = df_counties._id.astype(str)
-
-# Juntando carrinhos com municípios e autarquias para pegar seus nomes através de seus ids
-df_carts_with_counties = df_carts.merge(
-    df_counties[["_id", "name"]], left_on="county_id", right_on="_id")[["name", "products"]]
 
 # Expandindo a coluna de produtos
-df_exploded = df_carts_with_counties.explode(column="products")
+df_exploded = df_carts.explode(column="products")
+
 
 # Extraindo atributos dos produtos e colocando-os em outras colunas
-
-
 def getAtrr(row, atrribute):
     rowDict = dict(row)
     return rowDict[atrribute]
 
 
-df_exploded["_id"] = df_exploded["products"].apply(lambda x: getAtrr(x, "_id"))
+df_exploded["product_id"] = df_exploded["products"].apply(
+    lambda x: getAtrr(x, "_id"))
 df_exploded["quantity"] = df_exploded["products"].apply(
     lambda x: getAtrr(x, "quantity"))
 
-# Uma vez extraídos os produtos, pode-se excluir a coluna produtos
-df_exploded.drop(columns=["products"], inplace=True)
 
 # Montando o nome final do produto e adicionando-o na coluna descrição
-
-
 def getProductDesc(row):
-    measurementsList = list(row["measurements"])
+    measurementsList = list(row["products"]["measurements"])
     newList = []
     for m in measurementsList:
         newList.append(" ".join(list(m.values())))
 
-    normsList = list(row["norms"])
+    normsList = list(row["products"]["norms"])
 
-    return row["name"] + " " + " ".join(newList) + " " + " ".join(normsList)
+    return row["products"]["name"] + " " + " ".join(newList) + " " + " ".join(normsList)
 
 
-df_products["description"] = df_products.apply(
+df_exploded["description"] = df_exploded.apply(
     lambda x: getProductDesc(x), axis=1)
 
-# Processamento dos dataframes para unir o df expandido com o df de produtos
-newNames = {"name": "Município / Autarquia",
-            "description": "Produto", "quantity": "Quantidade"}
-
-df_products.product_id = df_products.product_id.astype(str)
-df_exploded._id = df_exploded._id.astype(str)
-
-df = df_exploded.merge(df_products[["product_id", "description"]], left_on="_id",
-                       right_on="product_id").drop(columns="_id").rename(columns=newNames)
-
-# Reorganizando o dataframe final e calculando o total
-df_pivot = df.pivot_table(
-    index="Produto", values="Quantidade", columns="Município / Autarquia")
-df_pivot["Total"] = df_pivot.sum(axis=1)
 
 # Exportando o dataframe final para planilha em Excel na Azure
-format_data = "%Y-%m-%d_%H-%M-%S"
-file_name = "Consolidado-de-Pedidos_" + \
-    datetime.strftime(datetime.today(), format_data) + ".xlsx"
-df_pivot.to_excel(file_name)
+def uploadToStorage(file_name):
+    try:
+        blob = BlobClient.from_connection_string(conn_str=os.getenv(
+            "AZURE_CONN_STR"), container_name="cisab-consolidados", blob_name=file_name)
+    except:
+        logging.error("Unable to connect with Blob Storage.")
+        exit()
 
-try:
-    blob = BlobClient.from_connection_string(conn_str=os.getenv(
-        "AZURE_CONN_STR"), container_name="cisab-consolidados", blob_name=file_name)
-except:
-    logging.error("Unable to connect with Blob Storage.")
-    exit()
+    try:
+        with open(file_name, "rb") as data:
+            blob.upload_blob(data)
+    except:
+        logging.error("Unable to upload the file to Blob Storage.")
+        exit()
 
-try:
-    with open(file_name, "rb") as data:
-        blob.upload_blob(data)
-except:
-    logging.error("Unable to upload the file to Blob Storage.")
-    exit()
 
 # Enviando evento para o RabbitMQ mandar o email
-try:
-    credentials = pika.PlainCredentials(os.getenv("RABBITMQ_USER"),
-                                        os.getenv("RABBITMQ_PASSWORD"))
-    connection = pika.BlockingConnection(
-        pika.ConnectionParameters(os.getenv("RABBITMQ_CONN_STR"),
-                                  int(os.getenv("RABBITMQ_PORT")),
-                                  '/',
-                                  credentials))
-except:
-    logging.error("Unable to connect with RabbitMQ.")
-    exit()
+def createAndSendEvent(connection, file_name):
+    channel = connection.channel()
 
-channel = connection.channel()
-
-to = os.getenv("RABBITMQ_TO")
-event = {
-    "pattern": "send_email",
-    "data": {
-      "message": {
-        "to": to,
-        "subject": "Consolidado de pedidos",
-        "body": "A demanda fechou e você pode baixar o consolidado de pedidos pelo link: <a href='" + os.getenv("AZURE_BLOB_STORAGE") + file_name + "'>clique aqui</a>"
-      }
+    to = os.getenv("RABBITMQ_TO")
+    event = {
+        "pattern": "send_email",
+        "data": {
+            "message": {
+                "to": to,
+                "subject": "Consolidado de pedidos",
+                "body": "A demanda fechou e você pode baixar o consolidado de pedidos pelo link: <a href='" + os.getenv("AZURE_BLOB_STORAGE") + file_name + "'>clique aqui</a>"
+            }
+        }
     }
-}
+
+    channel.queue_declare(queue='notifier')
+    channel.basic_publish(exchange='',
+                          routing_key='notifier',
+                          body=json.dumps(event, ensure_ascii=False))
+
+    logging.info(f"Email has been sent to {to}")
+
+    channel.close()
 
 
-channel.queue_declare(queue='notifier')
-channel.basic_publish(exchange='',
-                      routing_key='notifier',
-                      body=json.dumps(event, ensure_ascii=False))
+def sendEmail(file_name):
+    try:
+        credentials = pika.PlainCredentials(os.getenv("RABBITMQ_USER"),
+                                            os.getenv("RABBITMQ_PASSWORD"))
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(os.getenv("RABBITMQ_CONN_STR"),
+                                      int(os.getenv("RABBITMQ_PORT")),
+                                      '/',
+                                      credentials))
 
-logging.info(f"Email has been sent to {to}")
+        createAndSendEvent(connection, file_name)
 
-channel.close()
+    except:
+        logging.error("Unable to connect with RabbitMQ.")
+        exit()
+
+
+# Gerando a planilha a partir do dataframe final
+def generateSheet(df, demand_id):
+    df_demand = df[df.demand_id == demand_id].reset_index()
+
+    if (len(df_demand) > 0):
+        df_pivot = df_demand.pivot_table(
+            index="Produto", values="Quantidade", columns="Município / Autarquia")
+        df_pivot["Total"] = df_pivot.sum(axis=1)
+        df_pivot = df_pivot.sort_values(by="Produto")
+
+        format_data = "%Y-%m-%d %H-%M-%S"
+        file_name = datetime.strftime(datetime.today(), format_data) + \
+            " " + df_demand.loc[0, "demand_name"] + ".xlsx"
+        df_pivot.to_excel(file_name)
+
+        uploadToStorage(file_name)
+        sendEmail(file_name)
+    else:
+        logging.warning("There weren't any orders for " + demand_id)
+
+
+# Pós-processamento
+newNames = {"county_name": "Município / Autarquia",
+            "description": "Produto", "quantity": "Quantidade"}
+df = df_exploded.rename(columns=newNames)
+
+
+# Executando processos finais para cada demanda fechada no dia
+for demand in closed_demands:
+    generateSheet(df, demand)
