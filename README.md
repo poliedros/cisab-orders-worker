@@ -4,21 +4,16 @@ Para executar esta aplicação:
 
 1. Primeiro configure as variáveis de ambiente em um arquivo <em>.env</em>.
 
-  `MONGO_CONN_STR`
-  
-  `AZURE_CONN_STR`
-  
-  `AZURE_BLOB_STORAGE`
-  
-  `RABBITMQ_CONN_STR`
-  
-  `RABBITMQ_USER`
-  
-  `RABBITMQ_PASSWORD`
-  
-  `RABBITMQ_PORT`
-  
-  `RABBITMQ_TO`
+  ```
+  MONGO_CONN_STR
+  AZURE_CONN_STR
+  AZURE_BLOB_STORAGE
+  RABBITMQ_CONN_STR
+  RABBITMQ_USER
+  RABBITMQ_PASSWORD
+  RABBITMQ_PORT
+  RABBITMQ_TO
+  ```
  
 2. Instale os requerimentos:
 
