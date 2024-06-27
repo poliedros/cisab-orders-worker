@@ -7,10 +7,14 @@ import pika
 import logging
 import pymongo
 import pandas as pd
-from datetime import datetime
+from itertools import chain
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from azure.storage.blob import BlobClient
-
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
@@ -45,9 +49,10 @@ demand_collection = database.get_collection("demands")
 
 # Extraindo demandas que fecham na data de hoje
 today = datetime.today()
-tomorrow = today.replace(day=today.day + 1, hour=0,
-                         minute=0, second=0, microsecond=0)
+tomorrow = today + timedelta(days=1)
+
 today = today.replace(hour=0, minute=0, second=0, microsecond=0)
+tomorrow = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
 
 demands = demand_collection.find({
     "end_date": {"$gte": today, "$lt": tomorrow}
@@ -126,68 +131,105 @@ def uploadToStorage(file_name):
 
 
 # Enviando evento para o RabbitMQ mandar o email
-def createAndSendEvent(connection, file_name):
+def createAndSendEvent(connection, spreadsheet, pdf):
     channel = connection.channel()
 
     to = os.getenv("RABBITMQ_TO")
     event = {
         "pattern": "send_email",
         "data": {
-            "message": {
-                "to": to,
-                "subject": "Consolidado de pedidos",
-                "body": "A demanda fechou e você pode baixar o consolidado de pedidos pelo link: <a href='" + os.getenv("AZURE_BLOB_STORAGE") + file_name + "'>clique aqui</a>"
-            }
+        "message": {
+            "to": to,
+            "subject": "Consolidado de pedidos",
+            "body": "A demanda fechou e você pode baixar o consolidado de pedidos pelo link: <a href='" + os.getenv("AZURE_BLOB_STORAGE") + spreadsheet + "'>clique aqui</a>. Você também pode baixar o relatório de pedidos pelo link: <a href='" + os.getenv("AZURE_BLOB_STORAGE") + pdf + "'>clique aqui</a>"
+        }
         }
     }
 
     channel.queue_declare(queue='notifier')
     channel.basic_publish(exchange='',
-                          routing_key='notifier',
-                          body=json.dumps(event, ensure_ascii=False))
+                        routing_key='notifier',
+                        body=json.dumps(event, ensure_ascii=False))
 
     logging.info(f"Email has been sent to {to}")
 
     channel.close()
 
 
-def sendEmail(file_name):
+def sendEmail(spreadsheet, pdf):
     try:
         credentials = pika.PlainCredentials(os.getenv("RABBITMQ_USER"),
                                             os.getenv("RABBITMQ_PASSWORD"))
         connection = pika.BlockingConnection(
             pika.ConnectionParameters(os.getenv("RABBITMQ_CONN_STR"),
-                                      int(os.getenv("RABBITMQ_PORT")),
-                                      '/',
-                                      credentials))
-
-        createAndSendEvent(connection, file_name)
+                                    int(os.getenv("RABBITMQ_PORT")),
+                                    '/',
+                                    credentials))
+        
+        createAndSendEvent(connection, spreadsheet, pdf)
 
     except:
         logging.error("Unable to connect with RabbitMQ.")
         exit()
 
+# Gerando relatório em PDF com os pedidos de cada município
+def createPDF(df, file_name):
+  county_prods = []
+  for county in df["Município / Autarquia"].unique():
+    prods_list = df[df["Município / Autarquia"] == county][["Produto", "Quantidade"]].values.tolist()
+    prods_list.insert(0, [county])
+    county_prods.append(prods_list)
+
+  subheaders = []
+  unnested_list = list(chain(*county_prods))
+  for county in df["Município / Autarquia"].unique():
+    subheaders.append(unnested_list.index([county]))
+
+  # Criando PDF
+  doc = SimpleDocTemplate(file_name, pagesize=letter)
+
+  # Colocando título
+  styles = getSampleStyleSheet()
+  styles.add(ParagraphStyle(name='centered', parent=styles['Heading3'], alignment=TA_CENTER))
+  title = Paragraph("Relatório de pedidos por município", styles["Title"])
+  subtitle = Paragraph(df.loc[0, 'demand_name'], styles["centered"])
+
+  # Criando tabela
+  table = Table(unnested_list)
+
+  for i in subheaders:
+    # Adicionando estilo para os subtítulos (nome dos municípios)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, i), (-1, i), "gray"),
+        ("TEXTCOLOR", (0, i), (-1, i), "white"),
+    ]))
+
+  # Gerando PDF
+  doc.build([title, subtitle, table])
 
 # Gerando a planilha a partir do dataframe final
-def generateSheet(df, demand_id):
+def generateFiles(df, demand_id):
     df_demand = df[df.demand_id == demand_id].reset_index()
 
-    if (len(df_demand) > 0):
-        df_pivot = df_demand.pivot_table(
-            index="Produto", values="Quantidade", columns="Município / Autarquia")
+    if(len(df_demand) > 0):
+        df_pivot = df_demand.pivot_table(index="Produto", values="Quantidade", columns="Município / Autarquia")
         df_pivot["Total"] = df_pivot.sum(axis=1)
         df_pivot = df_pivot.sort_values(by="Produto")
 
         format_data = "%Y-%m-%d %H-%M-%S"
         file_name = datetime.strftime(datetime.today(), format_data) + \
-            " " + df_demand.loc[0, "demand_name"] + ".xlsx"
-        df_pivot.to_excel(file_name)
+            " " + df_demand.loc[0, "demand_name"]
+        sheet_name = f"{file_name}.xlsx"
+        pdf_name = f"{file_name}.pdf"
 
-        uploadToStorage(file_name)
-        sendEmail(file_name)
+        df_pivot.to_excel(sheet_name)
+        createPDF(df_demand, pdf_name)
+
+        uploadToStorage(sheet_name)
+        uploadToStorage(pdf_name)
+        sendEmail(sheet_name, pdf_name)
     else:
         logging.warning("There weren't any orders for " + demand_id)
-
 
 # Pós-processamento
 newNames = {"county_name": "Município / Autarquia",
