@@ -239,4 +239,4 @@ df = df_exploded.rename(columns=newNames)
 
 # Executando processos finais para cada demanda fechada no dia
 for demand in closed_demands:
-    generateSheet(df, demand)
+    generateFiles(df, demand)
